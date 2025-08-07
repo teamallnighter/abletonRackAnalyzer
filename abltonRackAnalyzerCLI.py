@@ -70,15 +70,21 @@ def export_xml_to_file(xml_root, original_file_path, output_folder="."):
         print(f"❌ Error exporting XML: {e}")
         return None
 
-def parse_chains_and_devices(xml_root, verbose=False):
+def parse_chains_and_devices(xml_root, filename=None, verbose=False):
     """Parse the chain structure and devices in each chain"""
     if xml_root is None:
         return None
     
+    # Extract use case from filename
+    use_case = "Unknown"
+    if filename:
+        # Get the base name without extension and path
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        use_case = base_name
+    
     rack_info = {
         "rack_name": "Unknown",
-        "ableton_version": f"{xml_root.get('MajorVersion', '')}.{xml_root.get('MinorVersion', '')}",
-        "creator": xml_root.get("Creator", ""),
+        "use_case": use_case,
         "macro_controls": [],
         "chains": []
     }
@@ -105,12 +111,17 @@ def parse_chains_and_devices(xml_root, verbose=False):
                     "index": i
                 })
     
-    # Find all InstrumentBranchPreset elements (these are the chains)
+    # Find chains and devices - handle both Instrument Racks and Audio Effect Racks
     if verbose:
         print(f"\n🔗 CHAINS AND DEVICES:")
     
+    # Look for InstrumentBranchPreset elements (Instrument Racks)
     branch_presets = xml_root.findall(".//InstrumentBranchPreset")
     
+    # Look for AudioEffectGroupDevice structure (Audio Effect Racks)
+    audio_effect_groups = xml_root.findall(".//AudioEffectGroupDevice")
+    
+    # Process Instrument Rack chains
     for i, branch in enumerate(branch_presets):
         # Get chain name
         name_elem = branch.find("Name")
@@ -121,7 +132,7 @@ def parse_chains_and_devices(xml_root, verbose=False):
         is_soloed = solo_elem.get("Value") == "true" if solo_elem is not None else False
         
         if verbose:
-            print(f"\n📁 Chain: {chain_name} {'(SOLOED)' if is_soloed else ''}")
+            print(f"\n� Chain: {chain_name} {'(SOLOED)' if is_soloed else ''}")
         
         chain_info = {
             "name": chain_name,
@@ -132,79 +143,7 @@ def parse_chains_and_devices(xml_root, verbose=False):
         # Find devices in this chain
         device_presets = branch.findall(".//DevicePresets")
         for device_preset_group in device_presets:
-            devices_found = []
-            
-            # Look for different types of devices
-            # 1. Operator devices
-            operators = device_preset_group.findall(".//Operator")
-            for op in operators:
-                user_name_elem = op.find("UserName")
-                user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
-                device_name = user_name if user_name else "Operator"
-                
-                # Check if device is on
-                on_elem = op.find("On/Manual")
-                is_on = on_elem.get("Value") == "true" if on_elem is not None else True
-                
-                device_info = {
-                    "type": "Operator",
-                    "name": device_name,
-                    "is_on": is_on
-                }
-                devices_found.append(device_info)
-                if verbose:
-                    print(f"  🎹 {device_name} (Operator) - {'ON' if is_on else 'OFF'}")
-            
-            # 2. EQ8 devices
-            eq8_devices = device_preset_group.findall(".//Eq8")
-            for eq in eq8_devices:
-                user_name_elem = eq.find("UserName")
-                user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
-                device_name = user_name if user_name else "EQ Eight"
-                
-                # Check if device is on
-                on_elem = eq.find("On/Manual")
-                is_on = on_elem.get("Value") == "true" if on_elem is not None else True
-                
-                device_info = {
-                    "type": "Eq8",
-                    "name": device_name,
-                    "is_on": is_on
-                }
-                devices_found.append(device_info)
-                if verbose:
-                    print(f"  🎛️  {device_name} (EQ Eight) - {'ON' if is_on else 'OFF'}")
-            
-            # 3. Look for other Ableton devices by tag name
-            common_devices = ['Compressor2', 'AutoFilter', 'Reverb', 'Delay', 'Chorus', 
-                            'Phaser', 'AutoPan', 'Gate', 'Limiter', 'MultibandDynamics',
-                            'Saturator', 'Frequency', 'Vocoder', 'Bass', 'DrumRack', 
-                            'Collision', 'Tension', 'Impulse', 'Simpler', 'Wavetable',
-                            'GlueCompressor', 'Shifter', 'PhaserNew', 'StereoGain',
-                            'AudioBranchMixerDevice', 'MxDeviceAudioEffect']
-            
-            for device_type in common_devices:
-                devices = device_preset_group.findall(f".//{device_type}")
-                for device in devices:
-                    user_name_elem = device.find("UserName")
-                    user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
-                    device_name = user_name if user_name else device_type
-                    
-                    # Check if device is on
-                    on_elem = device.find("On/Manual")
-                    is_on = on_elem.get("Value") == "true" if on_elem is not None else True
-                    
-                    device_info = {
-                        "type": device_type,
-                        "name": device_name,
-                        "is_on": is_on
-                    }
-                    devices_found.append(device_info)
-                    if verbose:
-                        # Add emoji based on device type
-                        emoji = get_device_emoji(device_type)
-                        print(f"  {emoji} {device_name} ({device_type}) - {'ON' if is_on else 'OFF'}")
-            
+            devices_found = parse_devices_in_group(device_preset_group, verbose, 0)
             chain_info["devices"].extend(devices_found)
         
         if not chain_info["devices"] and verbose:
@@ -212,7 +151,277 @@ def parse_chains_and_devices(xml_root, verbose=False):
         
         rack_info["chains"].append(chain_info)
     
+    # Look for AudioEffectBranchPreset elements (Audio Effect Racks)
+    audio_effect_branches = xml_root.findall(".//AudioEffectBranchPreset")
+    
+    # Process Audio Effect Branch chains (Audio Effect Racks)
+    for i, branch in enumerate(audio_effect_branches):
+        # Get chain name from UserName
+        user_name_elem = branch.find("UserName")
+        chain_name = user_name_elem.get("Value") if user_name_elem is not None else f"Audio Chain {i+1}"
+        
+        # Check if chain is soloed
+        solo_elem = branch.find("IsSoloed")
+        is_soloed = solo_elem.get("Value") == "true" if solo_elem is not None else False
+        
+        if verbose:
+            print(f"\n📁 Audio Effect Chain: {chain_name} {'(SOLOED)' if is_soloed else ''}")
+        
+        chain_info = {
+            "name": chain_name,
+            "is_soloed": is_soloed,
+            "devices": []
+        }
+        
+        # Find devices in this audio effect branch
+        device_presets = branch.findall(".//DevicePresets")
+        for device_preset_group in device_presets:
+            devices_found = parse_devices_in_group(device_preset_group, verbose, 0)
+            chain_info["devices"].extend(devices_found)
+        
+        if not chain_info["devices"] and verbose:
+            print("  ❌ No devices found in this audio effect chain")
+        
+        rack_info["chains"].append(chain_info)
+    
+    # Process Audio Effect Group devices (when no branches exist, devices are in the main group)
+    for i, audio_group in enumerate(audio_effect_groups):
+        # Check if this group has nested branches or is a flat device chain
+        branches = audio_group.find("Branches")
+        
+        if branches is not None and len(branches) == 0:
+            # This is a flat Audio Effect Rack (no parallel chains)
+            chain_name = "Main Chain"
+            user_name_elem = audio_group.find("UserName")
+            if user_name_elem is not None:
+                user_name = user_name_elem.get("Value", "")
+                if user_name:
+                    chain_name = user_name
+            
+            if verbose:
+                print(f"\n📁 Audio Effect Chain: {chain_name}")
+            
+            chain_info = {
+                "name": chain_name,
+                "is_soloed": False,
+                "devices": []
+            }
+            
+            # Find devices directly in the audio group
+            devices_found = parse_devices_in_group(audio_group, verbose, 0)
+            chain_info["devices"].extend(devices_found)
+            
+            if not chain_info["devices"] and verbose:
+                print("  ❌ No devices found in this audio effect chain")
+            
+            rack_info["chains"].append(chain_info)
+    
     return rack_info
+
+def parse_nested_rack_chains(rack_element, verbose=False, depth=0):
+    """Parse chains within a nested rack element"""
+    chains = []
+    indent = "  " * (depth + 1)
+    
+    # For AudioEffectGroupDevice, look for branches
+    branches = rack_element.find("Branches")
+    if branches is not None:
+        # Look for individual branch presets within the branches
+        branch_presets = branches.findall(".//InstrumentBranchPreset")
+        for i, branch in enumerate(branch_presets):
+            name_elem = branch.find("Name")
+            chain_name = name_elem.get("Value") if name_elem is not None else f"Chain {i+1}"
+            
+            # Check if chain is soloed
+            solo_elem = branch.find("IsSoloed")
+            is_soloed = solo_elem.get("Value") == "true" if solo_elem is not None else False
+            
+            if verbose:
+                print(f"{indent}📁 Nested Chain: {chain_name} {'(SOLOED)' if is_soloed else ''}")
+            
+            chain_info = {
+                "name": chain_name,
+                "is_soloed": is_soloed,
+                "devices": []
+            }
+            
+            # Find devices in this nested chain
+            device_presets = branch.findall(".//DevicePresets")
+            for device_preset_group in device_presets:
+                devices_found = parse_devices_in_group(device_preset_group, verbose, depth + 1)
+                chain_info["devices"].extend(devices_found)
+            
+            chains.append(chain_info)
+    else:
+        # If no branches, this might be a flat rack - treat as single chain
+        chain_info = {
+            "name": "Main Chain",
+            "is_soloed": False,
+            "devices": []
+        }
+        
+        # Find devices directly in the rack
+        devices_found = parse_devices_in_group(rack_element, verbose, depth + 1)
+        chain_info["devices"].extend(devices_found)
+        
+        if chain_info["devices"]:  # Only add if we found devices
+            chains.append(chain_info)
+    
+    return chains
+
+def parse_devices_in_group(device_group, verbose=False, depth=0):
+    """Parse devices within a device group (works for both Instrument and Audio Effect racks)
+    
+    Args:
+        device_group: The XML element containing devices
+        verbose: Whether to print verbose output
+        depth: Current nesting depth (for recursive calls)
+    """
+    devices_found = []
+    indent = "  " * (depth + 1)  # Indentation for nested output
+    
+    # First, look for nested racks within this group
+    nested_audio_racks = device_group.findall(".//AudioEffectGroupDevice")
+    nested_instrument_racks = device_group.findall(".//InstrumentBranchPreset")
+    
+    # Process nested Audio Effect Racks
+    for nested_rack in nested_audio_racks:
+        # Skip if this is the same element as the parent (avoid self-reference)
+        if nested_rack == device_group:
+            continue
+            
+        user_name_elem = nested_rack.find("UserName")
+        rack_name = user_name_elem.get("Value") if user_name_elem is not None else "Nested Audio Rack"
+        
+        # Check if device is on
+        on_elem = nested_rack.find("On/Manual")
+        is_on = on_elem.get("Value") == "true" if on_elem is not None else True
+        
+        if verbose:
+            print(f"{indent}🎛️  {rack_name} (Nested Audio Effect Rack) - {'ON' if is_on else 'OFF'}")
+        
+        # Parse the nested rack's chains recursively
+        nested_chains = parse_nested_rack_chains(nested_rack, verbose, depth + 1)
+        
+        device_info = {
+            "type": "AudioEffectGroupDevice",
+            "name": rack_name,
+            "is_on": is_on,
+            "chains": nested_chains
+        }
+        devices_found.append(device_info)
+    
+    # Process nested Instrument Racks
+    for nested_rack in nested_instrument_racks:
+        # Skip if this is the same element as the parent
+        if nested_rack == device_group:
+            continue
+            
+        name_elem = nested_rack.find("Name")
+        rack_name = name_elem.get("Value") if name_elem is not None else "Nested Instrument Rack"
+        
+        # Check if device is on
+        on_elem = nested_rack.find("On/Manual")
+        is_on = on_elem.get("Value") == "true" if on_elem is not None else True
+        
+        if verbose:
+            print(f"{indent}🎹 {rack_name} (Nested Instrument Rack) - {'ON' if is_on else 'OFF'}")
+        
+        # Parse the nested rack's chains recursively
+        nested_chains = parse_nested_rack_chains(nested_rack, verbose, depth + 1)
+        
+        device_info = {
+            "type": "InstrumentBranchPreset",
+            "name": rack_name,
+            "is_on": is_on,
+            "chains": nested_chains
+        }
+        devices_found.append(device_info)
+    
+    # Now look for regular devices (excluding nested racks we already processed)
+    # 1. Operator devices
+    operators = device_group.findall(".//Operator")
+    for op in operators:
+        # Skip if this operator is inside a nested rack we already processed
+        if any(nested_rack in [parent for parent in op.iter()] for nested_rack in nested_audio_racks + nested_instrument_racks):
+            continue
+            
+        user_name_elem = op.find("UserName")
+        user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
+        device_name = user_name if user_name else "Operator"
+        
+        # Check if device is on
+        on_elem = op.find("On/Manual")
+        is_on = on_elem.get("Value") == "true" if on_elem is not None else True
+        
+        device_info = {
+            "type": "Operator",
+            "name": device_name,
+            "is_on": is_on
+        }
+        devices_found.append(device_info)
+        if verbose:
+            print(f"{indent}🎹 {device_name} (Operator) - {'ON' if is_on else 'OFF'}")
+    
+    # 2. EQ8 devices
+    eq8_devices = device_group.findall(".//Eq8")
+    for eq in eq8_devices:
+        # Skip if this EQ is inside a nested rack we already processed
+        if any(nested_rack in [parent for parent in eq.iter()] for nested_rack in nested_audio_racks + nested_instrument_racks):
+            continue
+            
+        user_name_elem = eq.find("UserName")
+        user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
+        device_name = user_name if user_name else "EQ Eight"
+        
+        # Check if device is on
+        on_elem = eq.find("On/Manual")
+        is_on = on_elem.get("Value") == "true" if on_elem is not None else True
+        
+        device_info = {
+            "type": "Eq8",
+            "name": device_name,
+            "is_on": is_on
+        }
+        devices_found.append(device_info)
+        if verbose:
+            print(f"{indent}🎛️  {device_name} (EQ Eight) - {'ON' if is_on else 'OFF'}")
+    
+    # 3. Look for other Ableton devices by tag name
+    common_devices = ['Compressor2', 'AutoFilter', 'Reverb', 'Delay', 'Chorus', 
+                    'Phaser', 'AutoPan', 'Gate', 'Limiter', 'MultibandDynamics',
+                    'Saturator', 'Frequency', 'Vocoder', 'Bass', 'DrumRack', 
+                    'Collision', 'Tension', 'Impulse', 'Simpler', 'Wavetable',
+                    'GlueCompressor', 'Shifter', 'PhaserNew', 'StereoGain',
+                    'AudioBranchMixerDevice', 'MxDeviceAudioEffect']
+    
+    for device_type in common_devices:
+        devices = device_group.findall(f".//{device_type}")
+        for device in devices:
+            # Skip if this device is inside a nested rack we already processed
+            if any(nested_rack in [parent for parent in device.iter()] for nested_rack in nested_audio_racks + nested_instrument_racks):
+                continue
+                
+            user_name_elem = device.find("UserName")
+            user_name = user_name_elem.get("Value") if user_name_elem is not None else ""
+            device_name = user_name if user_name else device_type
+            
+            # Check if device is on
+            on_elem = device.find("On/Manual")
+            is_on = on_elem.get("Value") == "true" if on_elem is not None else True
+            
+            device_info = {
+                "type": device_type,
+                "name": device_name,
+                "is_on": is_on
+            }
+            devices_found.append(device_info)
+            if verbose:
+                # Add emoji based on device type
+                emoji = get_device_emoji(device_type)
+                print(f"{indent}{emoji} {device_name} ({device_type}) - {'ON' if is_on else 'OFF'}")
+    
+    return devices_found
 
 def get_device_emoji(device_type):
     """Return an appropriate emoji for the device type"""
@@ -272,8 +481,7 @@ def print_summary(rack_info, quiet=False):
         print("📋 RACK ANALYSIS SUMMARY")
         print(f"{'='*60}")
     
-    print(f"📀 Ableton Version: {rack_info['ableton_version']}")
-    print(f"🏷️  Creator: {rack_info['creator']}")
+    print(f"🎯 Use Case: {rack_info['use_case']}")
     
     print(f"\n🎛️  Named Macro Controls: {len(rack_info['macro_controls'])}")
     for macro in rack_info['macro_controls']:
@@ -281,21 +489,48 @@ def print_summary(rack_info, quiet=False):
     
     print(f"\n🔗 Chains: {len(rack_info['chains'])}")
     total_devices = 0
+    
     for chain in rack_info['chains']:
-        total_devices += len(chain['devices'])
+        chain_device_count = count_devices_in_chain(chain)
+        total_devices += chain_device_count
+        
         chain_display = f"📁 {chain['name']}" if chain['name'] else "📁 [Unnamed Chain]"
-        if chain['is_soloed']:
+        if chain.get('is_soloed', False):
             chain_display += " (SOLOED)"
         print(f"\n{chain_display}")
-        print(f"   Devices: {len(chain['devices'])}")
+        print(f"   Devices: {chain_device_count}")
         
         if not quiet:
-            for device in chain['devices']:
-                status = "🟢" if device['is_on'] else "🔴"
-                emoji = get_device_emoji(device['type'])
-                print(f"   {status} {emoji} {device['name']} ({device['type']})")
+            print_devices_recursive(chain['devices'], indent="   ")
     
     print(f"\n📊 Total Devices Across All Chains: {total_devices}")
+
+def count_devices_in_chain(chain):
+    """Recursively count all devices in a chain, including nested racks"""
+    count = 0
+    for device in chain['devices']:
+        count += 1
+        # If device has nested chains, count devices in those too
+        if 'chains' in device:
+            for nested_chain in device['chains']:
+                count += count_devices_in_chain(nested_chain)
+    return count
+
+def print_devices_recursive(devices, indent="   "):
+    """Recursively print devices, including nested racks"""
+    for device in devices:
+        status = "🟢" if device['is_on'] else "🔴"
+        emoji = get_device_emoji(device['type'])
+        print(f"{indent}{status} {emoji} {device['name']} ({device['type']})")
+        
+        # If this device has nested chains, print them too
+        if 'chains' in device:
+            for nested_chain in device['chains']:
+                chain_display = f"📁 {nested_chain['name']}" if nested_chain['name'] else "📁 [Unnamed Chain]"
+                if nested_chain.get('is_soloed', False):
+                    chain_display += " (SOLOED)"
+                print(f"{indent}  {chain_display}")
+                print_devices_recursive(nested_chain['devices'], indent + "    ")
 
 def validate_file_path(file_path):
     """Validate the input file path (can be file or directory)"""
@@ -360,7 +595,7 @@ def analyze_single_file(file_path, args):
         export_xml_to_file(xml_root, file_path, args.output)
     
     # Step 3: Analyze chains and devices
-    rack_info = parse_chains_and_devices(xml_root, verbose=args.verbose and not args.quiet)
+    rack_info = parse_chains_and_devices(xml_root, file_path, verbose=args.verbose and not args.quiet)
     
     if rack_info is None:
         print(f"❌ Failed to analyze rack structure: {os.path.basename(file_path)}")
